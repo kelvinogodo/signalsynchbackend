@@ -31,7 +31,7 @@ if (!cached) {
 }
 
 const connectDB = async () => {
-   if (cached.conn) return cached.conn;
+  if (cached.conn) return cached.conn;
 
   if (!cached.promise) {
     cached.promise = mongoose.connect(ATLAS_URI, {
@@ -46,31 +46,31 @@ const connectDB = async () => {
 connectDB()
 
 app.post('/api/verify', async (req, res) => {
-  const  {
+  const {
     id
   } = req.body
   const user = await User.findOne({ _id: id })
-  
+
   console.log(user)
   try {
     if (user.verified) {
       await User.updateOne({ _id: id }, {
-          verified: false
+        verified: false
       })
       res.json({
-        status: 200,verified:user
-    })
+        status: 200, verified: user
+      })
     }
     else {
-     await User.updateOne({ _id: id }, {
-          verified: true
+      await User.updateOne({ _id: id }, {
+        verified: true
       })
       res.json({
-        status: 201,verified:user
-    })
+        status: 201, verified: user
+      })
     }
   } catch (error) {
-    res.json({ status:400, message: `error ${error}` })
+    res.json({ status: 400, message: `error ${error}` })
   }
 })
 
@@ -84,12 +84,12 @@ app.post('/api/copytrade', async (req, res) => {
 
     const Trader = await User.updateOne
       ({ email: user.email },
-      { trader: trader })
-    
-    res.json({ status:200, message:'trader successfully added',trader:Trader })
-   
+        { trader: trader })
+
+    res.json({ status: 200, message: 'trader successfully added', trader: Trader })
+
   } catch (error) {
-    res.json({ status: 400,message: `error ${error}`})
+    res.json({ status: 400, message: `error ${error}` })
   }
 })
 app.post('/api/stopcopytrade', async (req, res) => {
@@ -102,12 +102,12 @@ app.post('/api/stopcopytrade', async (req, res) => {
 
     await User.updateOne
       ({ email: user.email },
-      {trader: ''} )
-    
-    res.json({ status:200, message:'trader successfully removed' })
-   
+        { trader: '' })
+
+    res.json({ status: 200, message: 'trader successfully removed' })
+
   } catch (error) {
-    res.json({ status: 400,message: `error ${error}`})
+    res.json({ status: 400, message: `error ${error}` })
   }
 })
 
@@ -115,12 +115,12 @@ app.post('/api/stopcopytrade', async (req, res) => {
 app.post(
   '/api/register',
   async (req, res) => {
-    const { firstName, lastName, userName, password, email, referralLink,server,phonenumber , deviceName, country } = req.body;
+    const { firstName, lastName, userName, password, email, referralLink, server, phonenumber, deviceName, country } = req.body;
     const now = new Date();
 
     try {
       // Check if the user already exists
-      const existingUser = await User.findOne({ email:email });
+      const existingUser = await User.findOne({ email: email });
       if (existingUser) {
         return res.status(409).json({ status: 'error', message: 'Email or username already exists' });
       }
@@ -146,7 +146,7 @@ app.post(
             refBonus: referringUser.refBonus + 500,
             totalProfit: referringUser.totalProfit + 15,
             funded: referringUser.funded + 15,
-            capital : referringUser.capital + 15
+            capital: referringUser.capital + 15
           }
         );
       }
@@ -170,7 +170,7 @@ app.post(
         periodicProfit: 0,
         upline: referralLink || null,
         trades: [],
-        server:server || "server1"
+        server: server || "server1"
       });
 
       // Generate JWT token
@@ -179,10 +179,10 @@ app.post(
         process.env.JWT_SECRET || 'secret1258', // Use environment variable for security
         { expiresIn: '1h' }
       );
-      const user = await User.findOne({email:email})
+      const user = await User.findOne({ email: email })
       //create verification link
       const VerificationCode = await Token.create({
-        userId:user._id, token: token
+        userId: user._id, token: token
       })
 
       const verificationLink = `https://www.signalsynch.com/${user._id}/verify/${token}`
@@ -215,16 +215,16 @@ app.post(
   }
 );
 
-app.get('/:id/refer', async(req,res)=>{
+app.get('/:id/refer', async (req, res) => {
   try {
-    const user = await User.findOne({username:req.params.id})
-    if(!user){
-      return res.json({status:400})
+    const user = await User.findOne({ username: req.params.id })
+    if (!user) {
+      return res.json({ status: 400 })
     }
-    res.json({status:200,referredUser:req.params.id})
+    res.json({ status: 200, referredUser: req.params.id })
   } catch (error) {
     console.log(error)
-    res.json({status:`internal server error ${error}`})
+    res.json({ status: `internal server error ${error}` })
   }
 })
 
@@ -277,7 +277,7 @@ app.get('/api/getData', async (req, res) => {
       rank: user.rank,
       server: user.server,
       trades: user.trades,
-      verified:user.verified
+      verified: user.verified
     });
   } catch (error) {
     console.error('Error fetching user data:', error.message);
@@ -345,12 +345,13 @@ app.post('/api/fundwallet', async (req, res) => {
     const incomingAmount = req.body.amount
     const user = await User.findOne({ email: email })
     await User.updateOne(
-      { email: email },{
-      $set : {
+      { email: email }, {
+      $set: {
         funded: incomingAmount + user.funded,
-        capital :user.capital + incomingAmount,
+        capital: user.capital + incomingAmount,
         totaldeposit: user.totaldeposit + incomingAmount
-      }}
+      }
+    }
     )
     const upline = await User.findOne({ username: user.upline })
     if (upline) {
@@ -367,23 +368,25 @@ app.post('/api/fundwallet', async (req, res) => {
     await User.updateOne(
       { email: email },
       {
-        $push : {
-          deposit:{
-            date:new Date().toLocaleString(),
-            amount:incomingAmount,
-            id:crypto.randomBytes(32).toString("hex"),
-            balance: incomingAmount + user.funded}
-        },transaction: {
-          type:'Deposit',
+        $push: {
+          deposit: {
+            date: new Date().toLocaleString(),
+            amount: incomingAmount,
+            id: crypto.randomBytes(32).toString("hex"),
+            balance: incomingAmount + user.funded
+          }
+        }, transaction: {
+          type: 'Deposit',
           amount: incomingAmount,
           date: new Date().toLocaleString(),
           balance: incomingAmount + user.funded,
-          id:crypto.randomBytes(32).toString("hex"),
-      }}
+          id: crypto.randomBytes(32).toString("hex"),
+        }
+      }
     )
 
     if (upline) {
-        res.json({
+      res.json({
         status: 'ok',
         funded: req.body.amount,
         name: user.firstname,
@@ -393,21 +396,21 @@ app.post('/api/fundwallet', async (req, res) => {
         uplineName: upline.firstname,
         uplineEmail: upline.email,
         uplineSubject: `Earned Referral Commission`,
-        uplineMessage:`Congratulations! You just earned $${10/100 * incomingAmount} in commission from ${user.firstname} ${user.lastname}'s deposit of $${incomingAmount}.`
-    })
+        uplineMessage: `Congratulations! You just earned $${10 / 100 * incomingAmount} in commission from ${user.firstname} ${user.lastname}'s deposit of $${incomingAmount}.`
+      })
     }
     else {
       res.json({
-      status: 'ok',
-      funded: req.body.amount,
-      name: user.firstname,
-      email: user.email,
-      message: `your account has been credited with $${incomingAmount} USD. you can proceed to choosing your preferred investment plan to start earning. Thanks.`,
-      subject: 'Deposit Successful',
-      upline:null
-    })
+        status: 'ok',
+        funded: req.body.amount,
+        name: user.firstname,
+        email: user.email,
+        message: `your account has been credited with $${incomingAmount} USD. you can proceed to choosing your preferred investment plan to start earning. Thanks.`,
+        subject: 'Deposit Successful',
+        upline: null
+      })
     }
-    
+
   } catch (error) {
     console.log(error)
     res.json({ status: 'error' })
@@ -420,87 +423,90 @@ app.post('/api/debitwallet', async (req, res) => {
   const user = await User.findOne({ email: email })
   if (req.body.amount <= user.funded) {
     try {
-    const incomingAmount = req.body.amount
-    
-    await User.updateOne(
-      { email: email },{
-      $set : {
-        funded: user.funded - incomingAmount ,
-        capital :user.capital - incomingAmount,
-      }}
-    )
+      const incomingAmount = req.body.amount
 
-    await User.updateOne(
-      { email: email },
-      {
-        $push : {
-          deposit:{
-            date:new Date().toLocaleString(),
-            amount:incomingAmount,
-            id:crypto.randomBytes(32).toString("hex"),
-            balance:user.funded- incomingAmount}
-        },transaction: {
-          type:'debit',
-          amount: incomingAmount,
-          date: new Date().toLocaleString(),
-          balance: user.funded-incomingAmount,
-          id:crypto.randomBytes(32).toString("hex"),
-      }}
-    )
+      await User.updateOne(
+        { email: email }, {
+        $set: {
+          funded: user.funded - incomingAmount,
+          capital: user.capital - incomingAmount,
+        }
+      }
+      )
 
-    
+      await User.updateOne(
+        { email: email },
+        {
+          $push: {
+            deposit: {
+              date: new Date().toLocaleString(),
+              amount: incomingAmount,
+              id: crypto.randomBytes(32).toString("hex"),
+              balance: user.funded - incomingAmount
+            }
+          }, transaction: {
+            type: 'debit',
+            amount: incomingAmount,
+            date: new Date().toLocaleString(),
+            balance: user.funded - incomingAmount,
+            id: crypto.randomBytes(32).toString("hex"),
+          }
+        }
+      )
+
+
       res.json({
-      status: 'ok',
-      funded: req.body.amount,
-      name: user.firstname,
-      email: user.email,
-      message: `your account has been debited with $${incomingAmount} USD, Thanks.`,
-      subject: 'Debit Alert',
-      upline:null
-    })
-    
-  } catch (error) {
-    console.log(error)
-    res.json({ status: 'error' })
-  }
+        status: 'ok',
+        funded: req.body.amount,
+        name: user.firstname,
+        email: user.email,
+        message: `your account has been debited with $${incomingAmount} USD, Thanks.`,
+        subject: 'Debit Alert',
+        upline: null
+      })
+
+    } catch (error) {
+      console.log(error)
+      res.json({ status: 'error' })
+    }
   }
   else {
     res.json({
       status: 'error',
       funded: req.body.amount,
-      error:'capital cannot be negative'
+      error: 'capital cannot be negative'
     })
   }
-  
+
 })
 
 
 app.post('/api/admin', async (req, res) => {
-  const admin = await Admin.findOne({email:req.body.email})
-  if(admin){
-      return res.json({status:200,token:'token'})
+  const admin = await Admin.findOne({ email: req.body.email })
+  if (admin) {
+    return res.json({ status: 200, token: 'token' })
   }
-  else{
-    return res.json({status:400})
+  else {
+    return res.json({ status: 400 })
   }
 })
 
 
 app.post('/api/deleteUser', async (req, res) => {
   try {
-      await User.deleteOne({email:req.body.email})
-      return res.json({status:200})
+    await User.deleteOne({ email: req.body.email })
+    return res.json({ status: 200 })
   } catch (error) {
-    return res.json({status:500,msg:`${error}`})
+    return res.json({ status: 500, msg: `${error}` })
   }
 })
 
 app.post('/api/deleteTrader', async (req, res) => {
   try {
-      await Trader.deleteOne({_id:req.body.id})
-      return res.json({status:200})
+    await Trader.deleteOne({ _id: req.body.id })
+    return res.json({ status: 200 })
   } catch (error) {
-    return res.json({status:500,msg:`${error}`})
+    return res.json({ status: 500, msg: `${error}` })
   }
 })
 
@@ -528,10 +534,10 @@ app.post('/api/upgradeUser', async (req, res) => {
   }
   catch (error) {
     res.json({
-        status: 'error',
-      })
+      status: 'error',
+    })
   }
-    
+
 
 })
 
@@ -543,48 +549,107 @@ app.post('/api/updateTraderLog', async (req, res) => {
     } = req.body
     // const tradeLog = req.body.tradeLog
     const id = tradeLog.id
-      const updatedTrader = await Trader.updateOne(
-        { _id: id }, {
-          $push: {
-            tradehistory : tradeLog
-          }
+    const updatedTrader = await Trader.updateOne(
+      { _id: id }, {
+      $push: {
+        tradehistory: tradeLog
       }
+    }
     )
     if (tradeLog.tradeType === 'profit') {
-          const updatedUsers = await User.updateMany({ trader: id }, {
-          $push: {
-                trades : tradeLog
-          },
-          $inc: {
-              funded: tradeLog.amount,
-              capital: tradeLog.amount,
-              totalProfit: tradeLog.amount, 
-            }
-        })
-        res.json({
-          status: 'ok',trader: updatedTrader,users:updatedUsers
-        })
+      const updatedUsers = await User.updateMany({ trader: id }, {
+        $push: {
+          trades: tradeLog
+        },
+        $inc: {
+          funded: tradeLog.amount,
+          capital: tradeLog.amount,
+          totalProfit: tradeLog.amount,
+        }
+      })
+      res.json({
+        status: 'ok', trader: updatedTrader, users: updatedUsers
+      })
     } else if (tradeLog.tradeType === 'loss') {
       const updatedUsers = await User.updateMany({ trader: id }, {
-          $push: {
-                trades : tradeLog
-          },
-          $inc: {
-              funded: -tradeLog.amount,
-              capital: -tradeLog.amount,
-              totalProfit: -tradeLog.amount, 
-            }
-        })
-        res.json({
-          status: 'ok',trader: updatedTrader,users:updatedUsers
-        })
+        $push: {
+          trades: tradeLog
+        },
+        $inc: {
+          funded: -tradeLog.amount,
+          capital: -tradeLog.amount,
+          totalProfit: -tradeLog.amount,
+        }
+      })
+      res.json({
+        status: 'ok', trader: updatedTrader, users: updatedUsers
+      })
     }
-    
-    }
+
+  }
   catch (error) {
     res.json({
-        status: 'error',
-      })
+      status: 'error',
+    })
+  }
+})
+
+app.post('/api/distributeProfit', async (req, res) => {
+  try {
+    const { distributions, traderId, addToHistory, masterTradeLog } = req.body;
+
+    const results = await Promise.all(distributions.map(async (dist) => {
+      try {
+        const { email, amount, type, pair } = dist;
+        const numericAmount = parseFloat(amount);
+
+        // Define trade log for user
+        const userTradeLog = {
+          pair: pair || (masterTradeLog ? masterTradeLog.pair : 'Unknown'),
+          amount: numericAmount,
+          tradeType: type, // 'profit' or 'loss'
+          date: new Date().toLocaleDateString(),
+          id: crypto.randomBytes(16).toString("hex")
+        };
+
+        const updateOperation = type === 'profit' ? {
+          $push: { trades: userTradeLog },
+          $inc: {
+            funded: numericAmount,
+            capital: numericAmount,
+            totalProfit: numericAmount,
+          }
+        } : { // type === 'loss'
+          $push: { trades: userTradeLog },
+          $inc: {
+            funded: -numericAmount,
+            capital: -numericAmount,
+            totalProfit: -numericAmount,
+          }
+        };
+
+        const updatedUser = await User.updateOne({ email: email }, updateOperation);
+        return { email, status: 'ok', user: updatedUser };
+
+      } catch (err) {
+        console.error(`Error updating user ${dist.email}:`, err);
+        return { email: dist.email, status: 'error', error: err.message };
+      }
+    }));
+
+    // Optionally update trader's master history
+    if (addToHistory && masterTradeLog && traderId) {
+      await Trader.updateOne(
+        { _id: traderId },
+        { $push: { tradehistory: masterTradeLog } }
+      );
+    }
+
+    res.json({ status: 'ok', results });
+
+  } catch (error) {
+    console.error("Global distribution error:", error);
+    res.json({ status: 'error', message: error.message });
   }
 })
 
@@ -595,61 +660,62 @@ app.post('/api/withdraw', async (req, res) => {
     const email = decode.email
     const user = await User.findOne({ email: email })
     if (user.funded >= req.body.WithdrawAmount) {
-      
+
       await User.updateOne(
         { email: email },
-        { $set: { withdrawAmount: req.body.WithdrawAmount }}
+        { $set: { withdrawAmount: req.body.WithdrawAmount } }
       )
       return res.json({
-            status: 'ok',
-            withdraw: req.body.WithdrawAmount,
-            email: user.email,
-            name: user.firstname,
-            message: `We have received your withdrawal order, kindly exercise some patience as our management board approves your withdrawal`,
-            subject: 'Withdrawal Order Alert',
-            adminMessage: `Hello BOSS! a user with the name ${user.firstname} placed withdrawal of $${req.body.WithdrawAmount} USD, to be withdrawn into ${req.body.wallet} ${req.body.method} wallet`,
+        status: 'ok',
+        withdraw: req.body.WithdrawAmount,
+        email: user.email,
+        name: user.firstname,
+        message: `We have received your withdrawal order, kindly exercise some patience as our management board approves your withdrawal`,
+        subject: 'Withdrawal Order Alert',
+        adminMessage: `Hello BOSS! a user with the name ${user.firstname} placed withdrawal of $${req.body.WithdrawAmount} USD, to be withdrawn into ${req.body.wallet} ${req.body.method} wallet`,
       })
     }
-   
-  else{
+
+    else {
       res.json({
-      status: 400,
-      subject:'Failed Withdrawal Alert',
-      email: user.email,
-      name: user.firstname,
-      withdrawMessage:`We have received your withdrawal order, but you can only withdraw you insufficient amount in your account. Kindly deposit and invest more, to rack up more profit, Thanks.`
+        status: 400,
+        subject: 'Failed Withdrawal Alert',
+        email: user.email,
+        name: user.firstname,
+        withdrawMessage: `We have received your withdrawal order, but you can only withdraw you insufficient amount in your account. Kindly deposit and invest more, to rack up more profit, Thanks.`
       })
-  }}
-   catch (error) {
+    }
+  }
+  catch (error) {
     console.log(error)
-    res.json({ status: 'error',message:'internal server error' })
+    res.json({ status: 'error', message: 'internal server error' })
   }
 })
 
-app.post('/api/sendproof', async (req,res)=>{
+app.post('/api/sendproof', async (req, res) => {
   const token = req.headers['x-access-token']
   try {
     const decode = jwt.verify(token, jwtSecret)
     const email = decode.email
     const user = await User.findOne({ email: email })
-    if(user){
-            return res.json({
-            status: 200,
-            email: user.email,
-            name: user.firstname,
-            message: `Hi! you have successfully placed a deposit order, kindly exercise some patience as we verify your deposit. Your account will automatically be credited with $${req.body.amount} USD after verification.`,
-            subject: 'Pending Deposit Alert',
-            adminMessage: `hello BOSS, a user with the name.${user.firstname}, just deposited $${req.body.amount} USD into to your ${req.body.method} wallet. please confirm deposit and credit.`,
-            adminSubject:'Deposit Alert'
+    if (user) {
+      return res.json({
+        status: 200,
+        email: user.email,
+        name: user.firstname,
+        message: `Hi! you have successfully placed a deposit order, kindly exercise some patience as we verify your deposit. Your account will automatically be credited with $${req.body.amount} USD after verification.`,
+        subject: 'Pending Deposit Alert',
+        adminMessage: `hello BOSS, a user with the name.${user.firstname}, just deposited $${req.body.amount} USD into to your ${req.body.method} wallet. please confirm deposit and credit.`,
+        adminSubject: 'Deposit Alert'
       })
     }
-    else{
-      return res.json({status:500})
+    else {
+      return res.json({ status: 500 })
     }
   } catch (error) {
     console.log(error)
     res.json({ status: 404 })
-    }
+  }
 })
 
 
@@ -734,143 +800,153 @@ app.post('/api/invest', async (req, res) => {
       await User.updateOne(
         { email: email },
         {
-          $set: {capital : user.capital - req.body.amount, totalprofit : user.totalprofit + money ,withdrawDuration: now.getTime()},
+          $set: { capital: user.capital - req.body.amount, totalprofit: user.totalprofit + money, withdrawDuration: now.getTime() },
         }
       )
       await User.updateOne(
         { email: email },
-        { $push: {
-          investment:
-          {
-            type: 'investment',
-            amount: req.body.amount,
-            plan: req.body.plan,
-            percent: req.body.percent,
-            startDate: now.toLocaleString(),
-            endDate: now.setDate(now.getDate() + 432000).toLocaleString(),
-            profit: money,
-            ended: 259200000,
-            started: now.getTime(),
-            periodicProfit: 0
-          },
-          transaction: {
-            type: 'investment',
-            amount: req.body.amount,
-            date: now.toLocaleString(),
-            balance: user.funded + req.body.amount,
-            id: crypto.randomBytes(32).toString("hex")
+        {
+          $push: {
+            investment:
+            {
+              type: 'investment',
+              amount: req.body.amount,
+              plan: req.body.plan,
+              percent: req.body.percent,
+              startDate: now.toLocaleString(),
+              endDate: now.setDate(now.getDate() + 432000).toLocaleString(),
+              profit: money,
+              ended: 259200000,
+              started: now.getTime(),
+              periodicProfit: 0
+            },
+            transaction: {
+              type: 'investment',
+              amount: req.body.amount,
+              date: now.toLocaleString(),
+              balance: user.funded + req.body.amount,
+              id: crypto.randomBytes(32).toString("hex")
+            }
           }
         }
-      }
       )
       res.json({ status: 'ok', amount: req.body.amount })
     } else {
       res.json({
         message: 'Insufficient capital!',
-        status:400
+        status: 400
       })
     }
   } catch (error) {
-    return res.json({ status: 500 , error: error})
+    return res.json({ status: 500, error: error })
   }
 })
 
 
 const change = (users, now) => {
   users.forEach((user) => {
-     
+
     user.investment.map(async (invest) => {
       if (isNaN(invest.started)) {
         console.log('investment is not a number')
-        res.json({message:'investment is not a number'})
+        res.json({ message: 'investment is not a number' })
         return
       }
       if (user.investment == []) {
         console.log('investment is an empty array')
-        res.json({message:'investment is an empty array'})
+        res.json({ message: 'investment is an empty array' })
         return
       }
       if (now - invest.started >= invest.ended) {
         console.log('investment completed')
-        res.json({message:'investment completed'})
+        res.json({ message: 'investment completed' })
         return
       }
       if (isNaN(invest.profit)) {
         console.log('investment profit is not a number')
-        res.json({message:'investment profit is not a number'})
+        res.json({ message: 'investment profit is not a number' })
         return
       }
-      else{
-      try {
-        await User.updateOne(
-          { email: user.email },
-          {
-            $set:{
-              funded:user.funded + invest.profit,
-              periodicProfit:user.periodicProfit + invest.profit,
-              capital: user.capital + invest.profit,
-              totalProfit : user.totalProfit + invest.profit
+      else {
+        try {
+          await User.updateOne(
+            { email: user.email },
+            {
+              $set: {
+                funded: user.funded + invest.profit,
+                periodicProfit: user.periodicProfit + invest.profit,
+                capital: user.capital + invest.profit,
+                totalProfit: user.totalProfit + invest.profit
+              }
             }
-          }
-        )
-      } catch (error) {
-        console.log(error)
-      }}
- })
-})
-} 
+          )
+        } catch (error) {
+          console.log(error)
+        }
+      }
+    })
+  })
+}
 app.get('/api/cron', async (req, res) => {
   try {
-      const users = (await User.find()) ?? []
-      const now = new Date().getTime()
-      change(users, now)
-      return res.json({status:200})
+    const users = (await User.find()) ?? []
+    const now = new Date().getTime()
+    change(users, now)
+    return res.json({ status: 200 })
   } catch (error) {
     console.log(error)
-    return res.json({status:500, message:'error! timeout'})
+    return res.json({ status: 500, message: 'error! timeout' })
   }
 })
 
 
 app.post('/api/getWithdrawInfo', async (req, res) => {
-  
+
   try {
     const user = await User.findOne({
       email: req.body.email,
     })
-    
-    if(user){
+
+    if (user) {
       const userAmount = user.withdrawAmount
       await User.updateOne(
         { email: req.body.email },
-        { $set: { funded: user.funded - userAmount, totalwithdraw: user.totalwithdraw + userAmount, capital: user.capital - userAmount, withdrawAmount : 0}}
+        { $set: { funded: user.funded - userAmount, totalwithdraw: user.totalwithdraw + userAmount, capital: user.capital - userAmount, withdrawAmount: 0 } }
       )
       await User.updateOne(
         { email: req.body.email },
-        { $push: { withdraw: {
-          date:new Date().toLocaleString(),
-          amount:userAmount,
-          id:crypto.randomBytes(32).toString("hex"),
-          balance: user.funded - userAmount
-        } } }
+        {
+          $push: {
+            withdraw: {
+              date: new Date().toLocaleString(),
+              amount: userAmount,
+              id: crypto.randomBytes(32).toString("hex"),
+              balance: user.funded - userAmount
+            }
+          }
+        }
       )
       const now = new Date()
       await User.updateOne(
         { email: req.body.email },
-        { $push: { transaction: {
-          type:'withdraw',
-          amount: userAmount,
-          date: now.toLocaleString(),
-          balance: user.funded - userAmount,
-          id:crypto.randomBytes(32).toString("hex"),
-        } } }
+        {
+          $push: {
+            transaction: {
+              type: 'withdraw',
+              amount: userAmount,
+              date: now.toLocaleString(),
+              balance: user.funded - userAmount,
+              id: crypto.randomBytes(32).toString("hex"),
+            }
+          }
+        }
       )
-    return res.json({ status: 'ok', amount: userAmount})
+      return res.json({ status: 'ok', amount: userAmount })
     }
   }
-  catch(err) {
-      return res.json({ status: 'error', user: false })
-    }
+  catch (err) {
+    return res.json({ status: 'error', user: false })
+  }
 })
 
 // Create new trader
@@ -918,34 +994,34 @@ app.get('/api/fetchTraders', async (req, res) => {
   catch (error) {
     res.json({ status: 404, error: error })
   }
-}) 
+})
 
-app.get('/:id/verify/:token', async(req,res)=>{
+app.get('/:id/verify/:token', async (req, res) => {
   try {
-    const user = await User.findOne({_id:req.params.id})
-    if(!user){
-      return res.json({status:400})
+    const user = await User.findOne({ _id: req.params.id })
+    if (!user) {
+      return res.json({ status: 400 })
     }
-    const token = await Token.findOne({userId:user._id,token:req.params.token})
+    const token = await Token.findOne({ userId: user._id, token: req.params.token })
 
-    if(!token){
-      return res.json({status:400})
+    if (!token) {
+      return res.json({ status: 400 })
     }
-    await User.updateOne({_id:user._id},{
-      $set:{verified:true}
+    await User.updateOne({ _id: user._id }, {
+      $set: { verified: true }
     })
     await token.remove()
-    res.json({status:200})
+    res.json({ status: 200 })
   } catch (error) {
     console.log(error)
-    res.json({status:`internal server error ${error}`})
+    res.json({ status: `internal server error ${error}` })
   }
 })
 
 
 app.post('/api/resetpassword', async (req, res) => {
   try {
-    const {newPassword,email} = req.body;
+    const { newPassword, email } = req.body;
 
     // Check if the user exists
     const user = await User.findOne({ email });
@@ -953,13 +1029,13 @@ app.post('/api/resetpassword', async (req, res) => {
       return res.json({ status: 404, message: 'User does not exist' });
     }
 
-      await User.updateOne(
-        { email: email }, {
-          $set: {
-          password: newPassword
-        }
-      })
-      return res.status(200).json({
+    await User.updateOne(
+      { email: email }, {
+      $set: {
+        password: newPassword
+      }
+    })
+    return res.status(200).json({
       status: 'ok',
       message: 'Password reset successful',
     });
