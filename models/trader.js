@@ -13,6 +13,8 @@ const trader = new mongoose.Schema(
     rrRatio: { type: String, default: '1:7' },
     traderImage: { type: String, default: '' },
     minimumcapital: { type: Number, required: true, default: 5000 },
+    deleted: { type: Boolean, default: false },
+    deletedAt: { type: Date, default: null }
   }
 )
 const Trader = mongoose.models.Trader || mongoose.model('Trader', trader)

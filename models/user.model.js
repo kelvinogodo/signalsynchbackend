@@ -61,7 +61,10 @@ const user = new mongoose.Schema(
     kycStatus: { type: String, default: 'not_submitted' }, // not_submitted, processing, approved, rejected
     kycSubmittedDate: { type: String, default: '' },
     kycApprovedDate: { type: String, default: '' },
-    kycRejectionReason: { type: String, default: '' }
+    kycRejectionReason: { type: String, default: '' },
+    // Soft delete
+    deleted: { type: Boolean, default: false },
+    deletedAt: { type: Date, default: null }
   }
 )
 const User = mongoose.models.User || mongoose.model('User', user)

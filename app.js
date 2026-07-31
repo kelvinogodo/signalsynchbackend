@@ -2,20 +2,43 @@ const express = require('express')
 const cors = require('cors')
 const dotenv = require('dotenv')
 const mongoose = require('mongoose')
+const bcrypt = require('bcrypt')
+const rateLimit = require('express-rate-limit')
 const User = require('./models/user.model')
 const Admin = require('./models/admin')
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const Token = require('./models/token')
 const Trader = require('./models/trader')
+const AuditLog = require('./models/auditlog')
+const PasswordResetToken = require('./models/passwordResetToken')
 dotenv.config()
 
 const app = express()
 
+if (!process.env.JWT_SECRET) {
+  throw new Error("Please define the JWT_SECRET environment variable. Refusing to start with no secret configured.");
+}
+
 const jwtSecret = process.env.JWT_SECRET;
 
+// CORS: explicit allowlist instead of '*'. Add any additional deployed frontend
+// origins (staging, preview URLs) here.
+const allowedOrigins = [
+  'https://www.signalsynch.com',
+  'https://signalsynch.com',
+  'http://localhost:3000',
+]
 
-app.use(cors())
+app.use(cors({
+  origin: function (origin, callback) {
+    // Allow non-browser tools / same-origin requests with no Origin header.
+    if (!origin || allowedOrigins.includes(origin)) {
+      return callback(null, true)
+    }
+    return callback(new Error('Not allowed by CORS'))
+  }
+}))
 app.use(express.json())
 
 const ATLAS_URI = process.env.ATLAS_URI;
@@ -45,18 +68,123 @@ const connectDB = async () => {
 }
 connectDB()
 
-app.post('/api/verify', async (req, res) => {
+// ---------------------------------------------------------------------------
+// Auth middleware
+// ---------------------------------------------------------------------------
+
+function requireAuth(req, res, next) {
+  const token = req.headers['x-access-token'];
+  if (!token) {
+    return res.status(401).json({ status: 'error', message: 'No token provided' });
+  }
+  try {
+    const decoded = jwt.verify(token, jwtSecret);
+    req.tokenEmail = decoded.email;
+    req.tokenUserId = decoded.id;
+    next();
+  } catch (error) {
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({ status: 'error', message: 'Token expired' });
+    }
+    return res.status(401).json({ status: 'error', message: 'Invalid token' });
+  }
+}
+
+function requireAdminAuth(req, res, next) {
+  const token = req.headers['x-access-token'];
+  if (!token) {
+    return res.status(401).json({ status: 'error', message: 'No token provided' });
+  }
+  try {
+    const decoded = jwt.verify(token, jwtSecret);
+    if (decoded.role !== 'admin') {
+      return res.status(403).json({ status: 'error', message: 'Admin access required' });
+    }
+    req.adminEmail = decoded.email;
+    req.adminId = decoded.adminId;
+    next();
+  } catch (error) {
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({ status: 'error', message: 'Token expired' });
+    }
+    return res.status(401).json({ status: 'error', message: 'Invalid token' });
+  }
+}
+
+// Lets a scheduled job (e.g. an external cron pinger) trigger /api/cron with a
+// shared secret header, OR an admin can trigger it manually with their token.
+function requireCronOrAdmin(req, res, next) {
+  const cronSecret = process.env.CRON_SECRET;
+  const provided = req.headers['x-cron-secret'];
+  if (cronSecret && provided === cronSecret) {
+    return next();
+  }
+  return requireAdminAuth(req, res, next);
+}
+
+async function logAudit(req, { action, target, success, details, actorEmail }) {
+  try {
+    await AuditLog.create({
+      adminEmail: actorEmail || req.adminEmail || 'unknown',
+      action,
+      target: target || '',
+      ip: req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '',
+      success: !!success,
+      details: details || {},
+    });
+  } catch (err) {
+    console.error('Failed to write audit log:', err);
+  }
+}
+
+function isValidAmount(value) {
+  const num = Number(value);
+  return Number.isFinite(num) && num > 0;
+}
+
+// ---------------------------------------------------------------------------
+// Rate limiters
+// ---------------------------------------------------------------------------
+
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { status: 'error', message: 'Too many login attempts. Please try again later.' },
+});
+
+const adminLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { status: 'error', message: 'Too many login attempts. Please try again later.' },
+});
+
+const resetLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { status: 'error', message: 'Too many password reset requests. Please try again later.' },
+});
+
+app.post('/api/verify', requireAdminAuth, async (req, res) => {
   const {
     id
   } = req.body
-  const user = await User.findOne({ _id: id })
-
-  console.log(user)
   try {
+    const user = await User.findOne({ _id: id, deleted: { $ne: true } })
+    if (!user) {
+      return res.json({ status: 400, message: 'User not found' })
+    }
+
     if (user.verified) {
       await User.updateOne({ _id: id }, {
         verified: false
       })
+      await logAudit(req, { action: 'toggle_pdt_verified', target: id, success: true, details: { newValue: false } })
       res.json({
         status: 200, verified: user
       })
@@ -65,22 +193,25 @@ app.post('/api/verify', async (req, res) => {
       await User.updateOne({ _id: id }, {
         verified: true
       })
+      await logAudit(req, { action: 'toggle_pdt_verified', target: id, success: true, details: { newValue: true } })
       res.json({
         status: 201, verified: user
       })
     }
   } catch (error) {
+    await logAudit(req, { action: 'toggle_pdt_verified', target: id, success: false, details: { error: String(error) } })
     res.json({ status: 400, message: `error ${error}` })
   }
 })
 
-app.post('/api/copytrade', async (req, res) => {
-  const token = req.headers['x-access-token']
+app.post('/api/copytrade', requireAuth, async (req, res) => {
   const trader = req.body.trader
   try {
-    const decode = jwt.verify(token, jwtSecret)
-    const email = decode.email
-    const user = await User.findOne({ email: email })
+    const email = req.tokenEmail
+    const user = await User.findOne({ email: email, deleted: { $ne: true } })
+    if (!user) {
+      return res.json({ status: 400, message: 'User not found' })
+    }
 
     const Trader = await User.updateOne
       ({ email: user.email },
@@ -92,13 +223,13 @@ app.post('/api/copytrade', async (req, res) => {
     res.json({ status: 400, message: `error ${error}` })
   }
 })
-app.post('/api/stopcopytrade', async (req, res) => {
-  const token = req.headers['x-access-token']
-  const trader = req.body.trader
+app.post('/api/stopcopytrade', requireAuth, async (req, res) => {
   try {
-    const decode = jwt.verify(token, jwtSecret)
-    const email = decode.email
-    const user = await User.findOne({ email: email })
+    const email = req.tokenEmail
+    const user = await User.findOne({ email: email, deleted: { $ne: true } })
+    if (!user) {
+      return res.json({ status: 400, message: 'User not found' })
+    }
 
     await User.updateOne
       ({ email: user.email },
@@ -111,7 +242,7 @@ app.post('/api/stopcopytrade', async (req, res) => {
   }
 })
 
-// register route 
+// register route
 app.post(
   '/api/register',
   async (req, res) => {
@@ -151,6 +282,8 @@ app.post(
         );
       }
 
+      const hashedPassword = await bcrypt.hash(password, 10);
+
       // Create a new user
       const newUser = await User.create({
         firstname: firstName,
@@ -158,7 +291,7 @@ app.post(
         username: userName,
         email,
         phonenumber,
-        password: password,
+        password: hashedPassword,
         funded: 0,
         investment: [],
         transaction: [],
@@ -176,7 +309,7 @@ app.post(
       // Generate JWT token
       const token = jwt.sign(
         { id: newUser._id, email: newUser.email },
-        process.env.JWT_SECRET || 'secret1258', // Use environment variable for security
+        jwtSecret,
         { expiresIn: '1h' }
       );
       const user = await User.findOne({ email: email })
@@ -229,20 +362,12 @@ app.get('/:id/refer', async (req, res) => {
 })
 
 
-app.get('/api/getData', async (req, res) => {
-  const token = req.headers['x-access-token'];
+app.get('/api/getData', requireAuth, async (req, res) => {
   try {
-    // Ensure token is provided
-    if (!token) {
-      return res.status(401).json({ status: 'error', message: 'No token provided' });
-    }
-
-    // Verify token and decode user details
-    const decoded = jwt.verify(token, jwtSecret); // Replace 'secret1258' with an environment variable for better security
-    const email = decoded.email;
+    const email = req.tokenEmail;
 
     // Fetch user data
-    const user = await User.findOne({ email });
+    const user = await User.findOne({ email, deleted: { $ne: true } });
     if (!user) {
       return res.status(404).json({ status: 'error', message: 'User not found' });
     }
@@ -281,50 +406,36 @@ app.get('/api/getData', async (req, res) => {
     });
   } catch (error) {
     console.error('Error fetching user data:', error.message);
-
-    // Differentiate between invalid token and server error
-    if (error.name === 'JsonWebTokenError') {
-      return res.status(401).json({ status: 'error', message: 'Invalid token' });
-    }
-    if (error.name === 'TokenExpiredError') {
-      return res.status(401).json({ status: 'error', message: 'Token expired' });
-    }
-
-    // Handle other server errors
     res.status(500).json({ status: 'error', message: 'Internal server error' });
   }
 });
 
 
+const ALLOWED_USER_UPDATE_FIELDS = [
+  'firstname', 'lastname', 'phonenumber', 'state',
+  'zipcode', 'address', 'profilepicture', 'country'
+];
 
-app.post('/api/updateUserData', async (req, res) => {
-  const token = req.headers['x-access-token'];
-
+app.post('/api/updateUserData', requireAuth, async (req, res) => {
   try {
-    const decode = jwt.verify(token, jwtSecret);
-    const email = decode.email;
-    const user = await User.findOne({ email: email });
+    const user = await User.findOne({ email: req.tokenEmail, deleted: { $ne: true } });
 
     if (!user) {
       return res.json({ status: 400, message: "User not found" });
     }
 
-    // Prepare an object to hold only changed fields
+    // Only a fixed, explicit whitelist of self-service profile fields can be
+    // changed here. Financial/verification/role fields are never accepted
+    // from this endpoint.
     let updatedFields = {};
-
-    // Loop through request body and compare with existing user data
-    Object.keys(req.body).forEach((key) => {
+    ALLOWED_USER_UPDATE_FIELDS.forEach((key) => {
       if (req.body[key] !== undefined && req.body[key] !== user[key]) {
         updatedFields[key] = req.body[key];
       }
     });
 
-    // Ensure email remains unchanged
-    delete updatedFields.email;
-
-    // Update only if there are changes
     if (Object.keys(updatedFields).length > 0) {
-      await User.updateOne({ email: user.email }, { $set: updatedFields });
+      await User.updateOne({ _id: user._id }, { $set: updatedFields });
       return res.json({ status: 200, message: "Profile updated successfully" });
     }
 
@@ -339,11 +450,21 @@ app.post('/api/updateUserData', async (req, res) => {
 
 
 
-app.post('/api/fundwallet', async (req, res) => {
+app.post('/api/fundwallet', requireAdminAuth, async (req, res) => {
+  const email = req.body.email
+  const incomingAmount = Number(req.body.amount)
   try {
-    const email = req.body.email
-    const incomingAmount = req.body.amount
-    const user = await User.findOne({ email: email })
+    if (!isValidAmount(incomingAmount)) {
+      await logAudit(req, { action: 'credit_wallet', target: email, success: false, details: { reason: 'invalid amount', amount: req.body.amount } })
+      return res.status(400).json({ status: 'error', message: 'Amount must be a positive number' })
+    }
+
+    const user = await User.findOne({ email: email, deleted: { $ne: true } })
+    if (!user) {
+      await logAudit(req, { action: 'credit_wallet', target: email, success: false, details: { reason: 'user not found' } })
+      return res.status(404).json({ status: 'error', message: 'User not found' })
+    }
+
     await User.updateOne(
       { email: email }, {
       $set: {
@@ -353,7 +474,7 @@ app.post('/api/fundwallet', async (req, res) => {
       }
     }
     )
-    const upline = await User.findOne({ username: user.upline })
+    const upline = await User.findOne({ username: user.upline, deleted: { $ne: true } })
     if (upline) {
       await User.updateOne({ username: user.upline }, {
         $set: {
@@ -385,10 +506,12 @@ app.post('/api/fundwallet', async (req, res) => {
       }
     )
 
+    await logAudit(req, { action: 'credit_wallet', target: email, success: true, details: { amount: incomingAmount } })
+
     if (upline) {
       res.json({
         status: 'ok',
-        funded: req.body.amount,
+        funded: incomingAmount,
         name: user.firstname,
         email: user.email,
         message: `your account has been credited with $${incomingAmount} USD. you can proceed to choosing your preferred investment plan to start earning. Thanks.`,
@@ -402,7 +525,7 @@ app.post('/api/fundwallet', async (req, res) => {
     else {
       res.json({
         status: 'ok',
-        funded: req.body.amount,
+        funded: incomingAmount,
         name: user.firstname,
         email: user.email,
         message: `your account has been credited with $${incomingAmount} USD. you can proceed to choosing your preferred investment plan to start earning. Thanks.`,
@@ -413,18 +536,27 @@ app.post('/api/fundwallet', async (req, res) => {
 
   } catch (error) {
     console.log(error)
+    await logAudit(req, { action: 'credit_wallet', target: email, success: false, details: { error: String(error) } })
     res.json({ status: 'error' })
   }
 })
 
-app.post('/api/debitwallet', async (req, res) => {
+app.post('/api/debitwallet', requireAdminAuth, async (req, res) => {
   const email = req.body.email
-  console.log(email)
-  const user = await User.findOne({ email: email })
-  if (req.body.amount <= user.funded) {
-    try {
-      const incomingAmount = req.body.amount
+  const incomingAmount = Number(req.body.amount)
+  try {
+    if (!isValidAmount(incomingAmount)) {
+      await logAudit(req, { action: 'debit_wallet', target: email, success: false, details: { reason: 'invalid amount', amount: req.body.amount } })
+      return res.status(400).json({ status: 'error', message: 'Amount must be a positive number' })
+    }
 
+    const user = await User.findOne({ email: email, deleted: { $ne: true } })
+    if (!user) {
+      await logAudit(req, { action: 'debit_wallet', target: email, success: false, details: { reason: 'user not found' } })
+      return res.status(404).json({ status: 'error', message: 'User not found' })
+    }
+
+    if (incomingAmount <= user.funded) {
       await User.updateOne(
         { email: email }, {
         $set: {
@@ -454,67 +586,139 @@ app.post('/api/debitwallet', async (req, res) => {
         }
       )
 
+      await logAudit(req, { action: 'debit_wallet', target: email, success: true, details: { amount: incomingAmount } })
 
       res.json({
         status: 'ok',
-        funded: req.body.amount,
+        funded: incomingAmount,
         name: user.firstname,
         email: user.email,
         message: `your account has been debited with $${incomingAmount} USD, Thanks.`,
         subject: 'Debit Alert',
         upline: null
       })
-
-    } catch (error) {
-      console.log(error)
-      res.json({ status: 'error' })
     }
-  }
-  else {
-    res.json({
-      status: 'error',
-      funded: req.body.amount,
-      error: 'capital cannot be negative'
-    })
-  }
-
-})
-
-
-app.post('/api/admin', async (req, res) => {
-  const admin = await Admin.findOne({ email: req.body.email })
-  if (admin) {
-    return res.json({ status: 200, token: 'token' })
-  }
-  else {
-    return res.json({ status: 400 })
+    else {
+      await logAudit(req, { action: 'debit_wallet', target: email, success: false, details: { reason: 'insufficient funds', amount: incomingAmount } })
+      res.json({
+        status: 'error',
+        funded: incomingAmount,
+        error: 'capital cannot be negative'
+      })
+    }
+  } catch (error) {
+    console.log(error)
+    await logAudit(req, { action: 'debit_wallet', target: email, success: false, details: { error: String(error) } })
+    res.json({ status: 'error' })
   }
 })
 
 
-app.post('/api/deleteUser', async (req, res) => {
+app.post('/api/admin', adminLoginLimiter, async (req, res) => {
   try {
-    await User.deleteOne({ email: req.body.email })
+    const { email, password } = req.body
+    const admin = await Admin.findOne({ email })
+
+    if (!admin) {
+      await logAudit(req, { action: 'admin_login', actorEmail: email, success: false, details: { reason: 'unknown email' } })
+      return res.json({ status: 400 })
+    }
+
+    let passwordMatches = false
+    let needsRehash = false
+
+    if (typeof admin.password === 'string' && admin.password.startsWith('$2')) {
+      passwordMatches = await bcrypt.compare(password, admin.password)
+    } else {
+      // Legacy plaintext admin account: verify by equality, then silently
+      // upgrade to a bcrypt hash on this successful match.
+      passwordMatches = password === admin.password
+      needsRehash = passwordMatches
+    }
+
+    if (!passwordMatches) {
+      await logAudit(req, { action: 'admin_login', actorEmail: email, success: false, details: { reason: 'incorrect password' } })
+      return res.json({ status: 400 })
+    }
+
+    if (needsRehash) {
+      admin.password = await bcrypt.hash(password, 10)
+      await admin.save()
+    }
+
+    const token = jwt.sign(
+      { adminId: admin._id, email: admin.email, role: 'admin' },
+      jwtSecret,
+      { expiresIn: '8h' }
+    )
+
+    await logAudit(req, { action: 'admin_login', actorEmail: email, success: true })
+    return res.json({ status: 200, token })
+  } catch (error) {
+    console.error('Error during admin login:', error)
+    return res.json({ status: 500 })
+  }
+})
+
+
+app.post('/api/deleteUser', requireAdminAuth, async (req, res) => {
+  const { email } = req.body
+  try {
+    await User.updateOne({ email }, { $set: { deleted: true, deletedAt: new Date() } })
+    await logAudit(req, { action: 'delete_user', target: email, success: true })
     return res.json({ status: 200 })
   } catch (error) {
+    await logAudit(req, { action: 'delete_user', target: email, success: false, details: { error: String(error) } })
     return res.json({ status: 500, msg: `${error}` })
   }
 })
 
-app.post('/api/deleteTrader', async (req, res) => {
+app.post('/api/admin/restoreUser', requireAdminAuth, async (req, res) => {
+  const { email } = req.body
   try {
-    await Trader.deleteOne({ _id: req.body.id })
+    await User.updateOne({ email }, { $set: { deleted: false, deletedAt: null } })
+    await logAudit(req, { action: 'restore_user', target: email, success: true })
     return res.json({ status: 200 })
   } catch (error) {
+    await logAudit(req, { action: 'restore_user', target: email, success: false, details: { error: String(error) } })
     return res.json({ status: 500, msg: `${error}` })
   }
 })
 
-app.post('/api/upgradeUser', async (req, res) => {
+app.post('/api/deleteTrader', requireAdminAuth, async (req, res) => {
+  const { id } = req.body
   try {
-    const email = req.body.email
-    const incomingAmount = req.body.amount
-    const user = await User.findOne({ email: email })
+    await Trader.updateOne({ _id: id }, { $set: { deleted: true, deletedAt: new Date() } })
+    await logAudit(req, { action: 'delete_trader', target: id, success: true })
+    return res.json({ status: 200 })
+  } catch (error) {
+    await logAudit(req, { action: 'delete_trader', target: id, success: false, details: { error: String(error) } })
+    return res.json({ status: 500, msg: `${error}` })
+  }
+})
+
+app.post('/api/admin/restoreTrader', requireAdminAuth, async (req, res) => {
+  const { id } = req.body
+  try {
+    await Trader.updateOne({ _id: id }, { $set: { deleted: false, deletedAt: null } })
+    await logAudit(req, { action: 'restore_trader', target: id, success: true })
+    return res.json({ status: 200 })
+  } catch (error) {
+    await logAudit(req, { action: 'restore_trader', target: id, success: false, details: { error: String(error) } })
+    return res.json({ status: 500, msg: `${error}` })
+  }
+})
+
+app.post('/api/upgradeUser', requireAdminAuth, async (req, res) => {
+  const email = req.body.email
+  const incomingAmount = Number(req.body.amount)
+  try {
+    if (!isValidAmount(incomingAmount)) {
+      await logAudit(req, { action: 'upgrade_user', target: email, success: false, details: { reason: 'invalid amount', amount: req.body.amount } })
+      return res.status(400).json({ status: 'error', message: 'Amount must be a positive number' })
+    }
+
+    const user = await User.findOne({ email: email, deleted: { $ne: true } })
     if (user) {
       await User.updateOne(
         { email: email }, {
@@ -526,13 +730,18 @@ app.post('/api/upgradeUser', async (req, res) => {
         }
       }
       )
+      await logAudit(req, { action: 'upgrade_user', target: email, success: true, details: { amount: incomingAmount } })
       res.json({
         status: 'ok',
-        funded: req.body.amount
+        funded: incomingAmount
       })
+    } else {
+      await logAudit(req, { action: 'upgrade_user', target: email, success: false, details: { reason: 'user not found' } })
+      res.status(404).json({ status: 'error', message: 'User not found' })
     }
   }
   catch (error) {
+    await logAudit(req, { action: 'upgrade_user', target: email, success: false, details: { error: String(error) } })
     res.json({
       status: 'error',
     })
@@ -542,12 +751,11 @@ app.post('/api/upgradeUser', async (req, res) => {
 })
 
 
-app.post('/api/updateTraderLog', async (req, res) => {
+app.post('/api/updateTraderLog', requireAdminAuth, async (req, res) => {
   try {
     const {
       tradeLog
     } = req.body
-    // const tradeLog = req.body.tradeLog
     const id = tradeLog.id
     const updatedTrader = await Trader.updateOne(
       { _id: id }, {
@@ -557,7 +765,7 @@ app.post('/api/updateTraderLog', async (req, res) => {
     }
     )
     if (tradeLog.tradeType === 'profit') {
-      const updatedUsers = await User.updateMany({ trader: id }, {
+      const updatedUsers = await User.updateMany({ trader: id, deleted: { $ne: true } }, {
         $push: {
           trades: tradeLog
         },
@@ -567,11 +775,12 @@ app.post('/api/updateTraderLog', async (req, res) => {
           totalProfit: tradeLog.amount,
         }
       })
+      await logAudit(req, { action: 'update_trader_log', target: id, success: true, details: { tradeType: 'profit', amount: tradeLog.amount } })
       res.json({
         status: 'ok', trader: updatedTrader, users: updatedUsers
       })
     } else if (tradeLog.tradeType === 'loss') {
-      const updatedUsers = await User.updateMany({ trader: id }, {
+      const updatedUsers = await User.updateMany({ trader: id, deleted: { $ne: true } }, {
         $push: {
           trades: tradeLog
         },
@@ -581,6 +790,7 @@ app.post('/api/updateTraderLog', async (req, res) => {
           totalProfit: -tradeLog.amount,
         }
       })
+      await logAudit(req, { action: 'update_trader_log', target: id, success: true, details: { tradeType: 'loss', amount: tradeLog.amount } })
       res.json({
         status: 'ok', trader: updatedTrader, users: updatedUsers
       })
@@ -588,20 +798,25 @@ app.post('/api/updateTraderLog', async (req, res) => {
 
   }
   catch (error) {
+    await logAudit(req, { action: 'update_trader_log', success: false, details: { error: String(error) } })
     res.json({
       status: 'error',
     })
   }
 })
 
-app.post('/api/distributeProfit', async (req, res) => {
+app.post('/api/distributeProfit', requireAdminAuth, async (req, res) => {
   try {
     const { distributions, traderId, addToHistory, masterTradeLog } = req.body;
 
     const results = await Promise.all(distributions.map(async (dist) => {
       try {
         const { email, amount, type, pair } = dist;
-        const numericAmount = parseFloat(amount);
+        const numericAmount = Number(amount);
+
+        if (!isValidAmount(numericAmount)) {
+          return { email, status: 'error', error: 'Invalid amount' };
+        }
 
         // Define trade log for user
         const userTradeLog = {
@@ -628,7 +843,7 @@ app.post('/api/distributeProfit', async (req, res) => {
           }
         };
 
-        const updatedUser = await User.updateOne({ email: email }, updateOperation);
+        const updatedUser = await User.updateOne({ email: email, deleted: { $ne: true } }, updateOperation);
         return { email, status: 'ok', user: updatedUser };
 
       } catch (err) {
@@ -645,34 +860,44 @@ app.post('/api/distributeProfit', async (req, res) => {
       );
     }
 
+    await logAudit(req, { action: 'distribute_profit', target: traderId || '', success: true, details: { count: distributions.length } })
+
     res.json({ status: 'ok', results });
 
   } catch (error) {
     console.error("Global distribution error:", error);
+    await logAudit(req, { action: 'distribute_profit', success: false, details: { error: String(error) } })
     res.json({ status: 'error', message: error.message });
   }
 })
 
-app.post('/api/withdraw', async (req, res) => {
-  const token = req.headers['x-access-token']
+app.post('/api/withdraw', requireAuth, async (req, res) => {
   try {
-    const decode = jwt.verify(token, jwtSecret)
-    const email = decode.email
-    const user = await User.findOne({ email: email })
-    if (user.funded >= req.body.WithdrawAmount) {
+    const email = req.tokenEmail
+    const user = await User.findOne({ email: email, deleted: { $ne: true } })
+    if (!user) {
+      return res.json({ status: 'error', message: 'User not found' })
+    }
+
+    const withdrawAmount = Number(req.body.WithdrawAmount)
+    if (!isValidAmount(withdrawAmount)) {
+      return res.status(400).json({ status: 'error', message: 'Withdraw amount must be a positive number' })
+    }
+
+    if (user.funded >= withdrawAmount) {
 
       await User.updateOne(
         { email: email },
-        { $set: { withdrawAmount: req.body.WithdrawAmount } }
+        { $set: { withdrawAmount: withdrawAmount } }
       )
       return res.json({
         status: 'ok',
-        withdraw: req.body.WithdrawAmount,
+        withdraw: withdrawAmount,
         email: user.email,
         name: user.firstname,
         message: `We have received your withdrawal order, kindly exercise some patience as our management board approves your withdrawal`,
         subject: 'Withdrawal Order Alert',
-        adminMessage: `Hello BOSS! a user with the name ${user.firstname} placed withdrawal of $${req.body.WithdrawAmount} USD, to be withdrawn into ${req.body.wallet} ${req.body.method} wallet`,
+        adminMessage: `Hello BOSS! a user with the name ${user.firstname} placed withdrawal of $${withdrawAmount} USD, to be withdrawn into ${req.body.wallet} ${req.body.method} wallet`,
       })
     }
 
@@ -692,12 +917,10 @@ app.post('/api/withdraw', async (req, res) => {
   }
 })
 
-app.post('/api/sendproof', async (req, res) => {
-  const token = req.headers['x-access-token']
+app.post('/api/sendproof', requireAuth, async (req, res) => {
   try {
-    const decode = jwt.verify(token, jwtSecret)
-    const email = decode.email
-    const user = await User.findOne({ email: email })
+    const email = req.tokenEmail
+    const user = await User.findOne({ email: email, deleted: { $ne: true } })
     if (user) {
       return res.json({
         status: 200,
@@ -720,36 +943,44 @@ app.post('/api/sendproof', async (req, res) => {
 
 
 
-const SECRET_KEY = process.env.JWT_SECRET || 'defaultsecretkey'; // Replace with your actual secret stored in .env
-
-app.post('/api/login', async (req, res) => {
+app.post('/api/login', loginLimiter, async (req, res) => {
   try {
     const { email, password, rememberme } = req.body;
 
     // Check if the user exists
-    const user = await User.findOne({ email });
+    const user = await User.findOne({ email, deleted: { $ne: true } });
     if (!user) {
       return res.json({ status: 404, message: 'User does not exist' });
     }
 
-    // Verify password
-    // const isPasswordValid = await bcrypt.compare(password, user.password);
-    if (password != user.password) {
+    let passwordMatches = false;
+    let needsRehash = false;
+
+    if (typeof user.password === 'string' && user.password.startsWith('$2')) {
+      passwordMatches = await bcrypt.compare(password, user.password);
+    } else {
+      // Legacy plaintext account: verify by equality, then silently upgrade
+      // to a bcrypt hash on this successful match. No forced reset.
+      passwordMatches = password === user.password;
+      needsRehash = passwordMatches;
+    }
+
+    if (!passwordMatches) {
       return res.json({ status: 401, message: 'Incorrect password' });
     }
 
-    // if (user.verified  === false) {
-    //   return res.json({ status: 400, message: 'Email not verified!' });
-    // }
+    if (needsRehash) {
+      user.password = await bcrypt.hash(password, 10);
+    }
 
     // Generate JWT token with user ID and email
     const token = jwt.sign(
       { id: user._id, email: user.email },
-      SECRET_KEY,
+      jwtSecret,
       { expiresIn: '7d' } // Set token to expire in 7 days
     );
 
-    // Update the user's "remember me" status
+    // Update the user's "remember me" status (and persist any password rehash)
     user.rememberme = rememberme || false;
     await user.save();
 
@@ -766,41 +997,53 @@ app.post('/api/login', async (req, res) => {
 });
 
 
-app.get('/api/getUsers', async (req, res) => {
-  const users = await User.find()
+app.get('/api/getUsers', requireAdminAuth, async (req, res) => {
+  const users = await User.find({ deleted: { $ne: true } }).select('-password')
+  await logAudit(req, { action: 'list_users', success: true })
   res.json(users)
 })
 
+app.get('/api/admin/auditlog', requireAdminAuth, async (req, res) => {
+  const logs = await AuditLog.find().sort({ createdAt: -1 }).limit(500)
+  res.json({ status: 200, logs })
+})
 
-app.post('/api/invest', async (req, res) => {
-  const token = req.headers['x-access-token']
+
+app.post('/api/invest', requireAuth, async (req, res) => {
   try {
-    const decode = jwt.verify(token, jwtSecret)
-    const email = decode.email
-    const user = await User.findOne({ email: email })
+    const email = req.tokenEmail
+    const user = await User.findOne({ email: email, deleted: { $ne: true } })
+    if (!user) {
+      return res.json({ status: 400, message: 'User not found' })
+    }
+
+    const investAmount = Number(req.body.amount)
+    if (!isValidAmount(investAmount)) {
+      return res.status(400).json({ status: 'error', message: 'Amount must be a positive number' })
+    }
 
     const money = (() => {
       switch (req.body.percent) {
         case '20%':
-          return (req.body.amount * 20) / 100
+          return (investAmount * 20) / 100
         case '35%':
-          return (req.body.amount * 35) / 100
+          return (investAmount * 35) / 100
         case '50%':
-          return (req.body.amount * 50) / 100
+          return (investAmount * 50) / 100
         case '65%':
-          return (req.body.amount * 65) / 100
+          return (investAmount * 65) / 100
         case '80%':
-          return (req.body.amount * 80) / 100
+          return (investAmount * 80) / 100
         case '100%':
-          return (req.body.amount * 100) / 100
+          return (investAmount * 100) / 100
       }
     })()
-    if (user.capital >= req.body.amount) {
+    if (user.capital >= investAmount) {
       const now = new Date()
       await User.updateOne(
         { email: email },
         {
-          $set: { capital: user.capital - req.body.amount, totalprofit: user.totalprofit + money, withdrawDuration: now.getTime() },
+          $set: { capital: user.capital - investAmount, totalprofit: user.totalprofit + money, withdrawDuration: now.getTime() },
         }
       )
       await User.updateOne(
@@ -810,7 +1053,7 @@ app.post('/api/invest', async (req, res) => {
             investment:
             {
               type: 'investment',
-              amount: req.body.amount,
+              amount: investAmount,
               plan: req.body.plan,
               percent: req.body.percent,
               startDate: now.toLocaleString(),
@@ -822,15 +1065,15 @@ app.post('/api/invest', async (req, res) => {
             },
             transaction: {
               type: 'investment',
-              amount: req.body.amount,
+              amount: investAmount,
               date: now.toLocaleString(),
-              balance: user.funded + req.body.amount,
+              balance: user.funded + investAmount,
               id: crypto.randomBytes(32).toString("hex")
             }
           }
         }
       )
-      res.json({ status: 'ok', amount: req.body.amount })
+      res.json({ status: 'ok', amount: investAmount })
     } else {
       res.json({
         message: 'Insufficient capital!',
@@ -846,25 +1089,17 @@ app.post('/api/invest', async (req, res) => {
 const change = (users, now) => {
   users.forEach((user) => {
 
-    user.investment.map(async (invest) => {
+    user.investment.forEach(async (invest) => {
       if (isNaN(invest.started)) {
-        console.log('investment is not a number')
-        res.json({ message: 'investment is not a number' })
         return
       }
-      if (user.investment == []) {
-        console.log('investment is an empty array')
-        res.json({ message: 'investment is an empty array' })
+      if (!user.investment || user.investment.length === 0) {
         return
       }
       if (now - invest.started >= invest.ended) {
-        console.log('investment completed')
-        res.json({ message: 'investment completed' })
         return
       }
       if (isNaN(invest.profit)) {
-        console.log('investment profit is not a number')
-        res.json({ message: 'investment profit is not a number' })
         return
       }
       else {
@@ -887,9 +1122,9 @@ const change = (users, now) => {
     })
   })
 }
-app.get('/api/cron', async (req, res) => {
+app.get('/api/cron', requireCronOrAdmin, async (req, res) => {
   try {
-    const users = (await User.find()) ?? []
+    const users = (await User.find({ deleted: { $ne: true } })) ?? []
     const now = new Date().getTime()
     change(users, now)
     return res.json({ status: 200 })
@@ -900,21 +1135,21 @@ app.get('/api/cron', async (req, res) => {
 })
 
 
-app.post('/api/getWithdrawInfo', async (req, res) => {
-
+app.post('/api/getWithdrawInfo', requireAdminAuth, async (req, res) => {
+  const email = req.body.email
   try {
     const user = await User.findOne({
-      email: req.body.email,
+      email: email, deleted: { $ne: true }
     })
 
     if (user) {
       const userAmount = user.withdrawAmount
       await User.updateOne(
-        { email: req.body.email },
+        { email: email },
         { $set: { funded: user.funded - userAmount, totalwithdraw: user.totalwithdraw + userAmount, capital: user.capital - userAmount, withdrawAmount: 0 } }
       )
       await User.updateOne(
-        { email: req.body.email },
+        { email: email },
         {
           $push: {
             withdraw: {
@@ -928,7 +1163,7 @@ app.post('/api/getWithdrawInfo', async (req, res) => {
       )
       const now = new Date()
       await User.updateOne(
-        { email: req.body.email },
+        { email: email },
         {
           $push: {
             transaction: {
@@ -941,16 +1176,21 @@ app.post('/api/getWithdrawInfo', async (req, res) => {
           }
         }
       )
+      await logAudit(req, { action: 'approve_withdrawal', target: email, success: true, details: { amount: userAmount } })
       return res.json({ status: 'ok', amount: userAmount })
+    } else {
+      await logAudit(req, { action: 'approve_withdrawal', target: email, success: false, details: { reason: 'user not found' } })
+      return res.json({ status: 'error', user: false })
     }
   }
   catch (err) {
+    await logAudit(req, { action: 'approve_withdrawal', target: email, success: false, details: { error: String(err) } })
     return res.json({ status: 'error', user: false })
   }
 })
 
 // Create new trader
-app.post('/api/createTrader', async (req, res) => {
+app.post('/api/createTrader', requireAdminAuth, async (req, res) => {
   try {
     const {
       firstname,
@@ -979,16 +1219,18 @@ app.post('/api/createTrader', async (req, res) => {
     });
 
     const savedTrader = await newTrader.save();
+    await logAudit(req, { action: 'create_trader', target: String(savedTrader._id), success: true })
     res.status(201).json(savedTrader);
   } catch (error) {
     console.error('Error creating trader:', error);
+    await logAudit(req, { action: 'create_trader', success: false, details: { error: String(error) } })
     res.status(500).json({ message: 'Server error', error });
   }
 });
 
 app.get('/api/fetchTraders', async (req, res) => {
   try {
-    const traders = await Trader.find()
+    const traders = await Trader.find({ deleted: { $ne: true } })
     res.json({ status: 200, traders: traders })
   }
   catch (error) {
@@ -1019,43 +1261,91 @@ app.get('/:id/verify/:token', async (req, res) => {
 })
 
 
-app.post('/api/resetpassword', async (req, res) => {
+app.post('/api/requestpasswordreset', resetLimiter, async (req, res) => {
   try {
-    const { newPassword, email } = req.body;
+    const { email } = req.body;
+    const genericResponse = { status: 'ok', message: 'If an account with that email exists, a reset link has been sent.' };
 
-    // Check if the user exists
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.json({ status: 404, message: 'User does not exist' });
+    if (!email) {
+      return res.json(genericResponse);
     }
 
-    await User.updateOne(
-      { email: email }, {
-      $set: {
-        password: newPassword
-      }
-    })
+    const user = await User.findOne({ email, deleted: { $ne: true } });
+    if (!user) {
+      return res.json(genericResponse);
+    }
+
+    // Invalidate any previous outstanding tokens for this account.
+    await PasswordResetToken.deleteMany({ userId: user._id });
+
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+
+    await PasswordResetToken.create({ userId: user._id, tokenHash });
+
+    const resetLink = `https://www.signalsynch.com/resetpassword/${rawToken}`;
+
+    return res.json({
+      status: 'ok',
+      email: user.email,
+      name: user.firstname,
+      resetLink,
+      subject: 'Password Reset Request',
+      message: `Click the link below to reset your password. This link expires in 15 minutes and can only be used once.`
+    });
+  } catch (error) {
+    console.error('Error requesting password reset:', error);
+    return res.status(500).json({ status: 'error', message: 'Internal server error' });
+  }
+});
+
+app.post('/api/resetpassword', resetLimiter, async (req, res) => {
+  try {
+    const { token, newPassword } = req.body;
+
+    if (!token || !newPassword) {
+      return res.status(400).json({ status: 'error', message: 'Token and new password are required' });
+    }
+
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const resetToken = await PasswordResetToken.findOne({ tokenHash });
+
+    if (!resetToken) {
+      return res.status(400).json({ status: 'error', message: 'Invalid or expired reset token' });
+    }
+
+    const FIFTEEN_MINUTES = 15 * 60 * 1000;
+    if (Date.now() - resetToken.createdAt.getTime() > FIFTEEN_MINUTES) {
+      await resetToken.deleteOne();
+      return res.status(400).json({ status: 'error', message: 'Reset token has expired' });
+    }
+
+    const user = await User.findById(resetToken.userId);
+    if (!user) {
+      await resetToken.deleteOne();
+      return res.status(404).json({ status: 'error', message: 'User does not exist' });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    await User.updateOne({ _id: user._id }, { $set: { password: hashedPassword } });
+
+    // Single-use: destroy the token immediately after a successful reset.
+    await resetToken.deleteOne();
+
     return res.status(200).json({
       status: 'ok',
       message: 'Password reset successful',
     });
   } catch (error) {
     console.error('password not reset', error);
-    return res.json({ status: 'error', message: 'password not reset' });
+    return res.status(500).json({ status: 'error', message: 'password not reset' });
   }
 });
 
 // KYC Submission Endpoint
-app.post('/api/submitKYC', async (req, res) => {
-  const token = req.headers['x-access-token'];
-
+app.post('/api/submitKYC', requireAuth, async (req, res) => {
   try {
-    if (!token) {
-      return res.status(401).json({ status: 'error', message: 'No token provided' });
-    }
-
-    const decoded = jwt.verify(token, jwtSecret);
-    const email = decoded.email;
+    const email = req.tokenEmail;
 
     const {
       middlename,
@@ -1079,7 +1369,7 @@ app.post('/api/submitKYC', async (req, res) => {
 
     // Update user with KYC data
     await User.updateOne(
-      { email },
+      { email, deleted: { $ne: true } },
       {
         $set: {
           middlename,
@@ -1116,10 +1406,9 @@ app.post('/api/submitKYC', async (req, res) => {
 });
 
 // Admin: Approve KYC
-app.post('/api/admin/approveKYC', async (req, res) => {
+app.post('/api/admin/approveKYC', requireAdminAuth, async (req, res) => {
+  const { email } = req.body;
   try {
-    const { email } = req.body;
-
     await User.updateOne(
       { email },
       {
@@ -1133,6 +1422,8 @@ app.post('/api/admin/approveKYC', async (req, res) => {
 
     const user = await User.findOne({ email });
 
+    await logAudit(req, { action: 'approve_kyc', target: email, success: true })
+
     res.status(200).json({
       status: 'ok',
       message: 'KYC approved successfully',
@@ -1141,15 +1432,15 @@ app.post('/api/admin/approveKYC', async (req, res) => {
     });
   } catch (error) {
     console.error('Error approving KYC:', error);
+    await logAudit(req, { action: 'approve_kyc', target: email, success: false, details: { error: String(error) } })
     res.status(500).json({ status: 'error', message: 'Internal server error' });
   }
 });
 
 // Admin: Reject KYC
-app.post('/api/admin/rejectKYC', async (req, res) => {
+app.post('/api/admin/rejectKYC', requireAdminAuth, async (req, res) => {
+  const { email, reason } = req.body;
   try {
-    const { email, reason } = req.body;
-
     await User.updateOne(
       { email },
       {
@@ -1163,6 +1454,8 @@ app.post('/api/admin/rejectKYC', async (req, res) => {
 
     const user = await User.findOne({ email });
 
+    await logAudit(req, { action: 'reject_kyc', target: email, success: true, details: { reason } })
+
     res.status(200).json({
       status: 'ok',
       message: 'KYC rejected',
@@ -1171,6 +1464,7 @@ app.post('/api/admin/rejectKYC', async (req, res) => {
     });
   } catch (error) {
     console.error('Error rejecting KYC:', error);
+    await logAudit(req, { action: 'reject_kyc', target: email, success: false, details: { error: String(error) } })
     res.status(500).json({ status: 'error', message: 'Internal server error' });
   }
 });
@@ -1179,4 +1473,3 @@ app.post('/api/admin/rejectKYC', async (req, res) => {
 
 
 module.exports = app
-
