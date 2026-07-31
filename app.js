@@ -60,13 +60,33 @@ const connectDB = async () => {
     cached.promise = mongoose.connect(ATLAS_URI, {
       useNewUrlParser: true,
       useUnifiedTopology: true,
-    }).then((mongoose) => mongoose);
+    }).then((mongoose) => mongoose).catch((err) => {
+      // Don't leave a rejected promise cached forever - let the next
+      // request retry the connection instead of failing permanently on
+      // this warm instance until it recycles.
+      cached.promise = null;
+      throw err;
+    });
   }
 
   cached.conn = await cached.promise;
   return cached.conn;
 }
-connectDB()
+
+// Every request waits for a real DB connection before hitting a route.
+// Without this, a cold serverless instance can start handling a request
+// while mongoose is still mid-handshake; if that handshake is slow enough
+// to exceed mongoose's command-buffering timeout, the query throws and the
+// route returns a bare 500 instead of a clean, understandable error.
+app.use(async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (err) {
+    console.error('Database connection error:', err);
+    res.status(503).json({ status: 'error', message: 'Database temporarily unavailable, please try again.' });
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Auth middleware
